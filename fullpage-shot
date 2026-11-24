@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""fullpage-shot: one tall screenshot of a whole page, including the
+content hidden inside scrollable sub-regions.
+
+This is a thin wrapper around shot-scraper (https://shot-scraper.datasette.io/).
+It runs shot-scraper with expand-scrollables.js injected before the shot and
+with no fixed height, so shot-scraper produces a full-length screenshot of
+the page *after* every internally scrollable element has been expanded to
+its full content size.
+
+Usage:
+    fullpage-shot URL -o out.png [--width 1280] [--wait 1000]
+                  [--shot-arg ARG ...]
+
+Extra shot-scraper options can be passed through with --shot-arg, e.g.:
+    fullpage-shot https://example.com -o out.png \
+        --shot-arg --browser-arg --shot-arg --ignore-certificate-errors
+"""
+
+import argparse
+import os
+import shutil
+import struct
+import subprocess
+import sys
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+EXPAND_JS = os.path.join(SCRIPT_DIR, "expand-scrollables.js")
+
+
+def find_shot_scraper():
+    """Locate the shot-scraper executable.
+
+    Order: $FULLPAGE_SHOT_SCRAPER, the project-local virtualenv
+    (.venv/bin/shot-scraper next to this script), then PATH.
+    """
+    env_path = os.environ.get("FULLPAGE_SHOT_SCRAPER")
+    if env_path and os.path.isfile(env_path):
+        return env_path
+    venv_bin = os.path.join(SCRIPT_DIR, ".venv", "bin", "shot-scraper")
+    if os.path.isfile(venv_bin):
+        return venv_bin
+    on_path = shutil.which("shot-scraper")
+    if on_path:
+        return on_path
+    return None
+
+
+def png_size(path):
+    """Read (width, height) from a PNG file's IHDR chunk, stdlib only."""
+    with open(path, "rb") as fh:
+        header = fh.read(24)
+    if len(header) < 24 or header[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+    width, height = struct.unpack(">II", header[16:24])
+    return width, height
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        prog="fullpage-shot",
+        description=(
+            "Take one tall screenshot of a whole page, including content "
+            "inside scrollable sub-regions (via shot-scraper)."
+        ),
+    )
+    parser.add_argument("url", help="Page URL, or a path to a local HTML file")
+    parser.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        help="Output image file (e.g. page.png)",
+    )
+    parser.add_argument(
+        "--width",
+        type=int,
+        default=1280,
+        help="Browser window width in pixels (default: 1280)",
+    )
+    parser.add_argument(
+        "--wait",
+        type=int,
+        default=0,
+        metavar="MS",
+        help="Extra milliseconds to wait after load before the shot",
+    )
+    parser.add_argument(
+        "--shot-arg",
+        action="append",
+        default=[],
+        metavar="ARG",
+        help="Extra argument passed through to shot-scraper (repeatable)",
+    )
+    args = parser.parse_args(argv)
+
+    shot_scraper = find_shot_scraper()
+    if shot_scraper is None:
+        print(
+            "error: shot-scraper not found. Install it first:\n"
+            "  pip install shot-scraper && shot-scraper install",
+            file=sys.stderr,
+        )
+        return 1
+    if not os.path.isfile(EXPAND_JS):
+        print(f"error: {EXPAND_JS} is missing", file=sys.stderr)
+        return 1
+
+    cmd = [
+        shot_scraper,
+        "shot",
+        args.url,
+        "-o",
+        args.output,
+        "--width",
+        str(args.width),
+        # No --height: shot-scraper then captures the full page length.
+        "--js-file",
+        EXPAND_JS,
+    ]
+    if args.wait:
+        cmd += ["--wait", str(args.wait)]
+    cmd += args.shot_arg
+
+    result = subprocess.run(cmd)
+    if result.returncode != 0:
+        return result.returncode
+
+    if os.path.isfile(args.output):
+        size = png_size(args.output) if args.output.endswith(".png") else None
+        if size:
+            print(f"fullpage-shot: {args.output} ({size[0]}x{size[1]})")
+        else:
+            print(f"fullpage-shot: {args.output}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
